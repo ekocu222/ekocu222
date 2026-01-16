@@ -1,0 +1,263 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================
+// User Management
+// =====================
+
+enum UserRole {
+  ADMIN
+  COACH
+  STUDENT
+}
+
+enum UserStatus {
+  PENDING    // Kayıt oldu, admin onayı bekliyor
+  APPROVED   // Onaylandı, login olabilir
+  REJECTED   // Reddedildi
+  SUSPENDED  // Askıya alındı (sonradan eklenebilir)
+}
+
+model User {
+  id           String     @id @default(uuid())
+  email        String     @unique
+  passwordHash String
+  role         UserRole
+  status       UserStatus @default(PENDING)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  approvedAt   DateTime?
+  approvedBy   String?    // Admin userId
+
+  // Relations
+  coachProfile   CoachProfile?
+  studentProfile StudentProfile?
+  refreshTokens  RefreshToken[]
+
+  @@index([email])
+  @@index([status, role])
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+  @@map("refresh_tokens")
+}
+
+// =====================
+// Coach & Student Profiles
+// =====================
+
+model CoachProfile {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  firstName String
+  lastName  String
+  phone     String?
+  bio       String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user              User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sentRequests      CoachStudentRequest[] @relation("CoachRequests")
+  assignments       Assignment[]
+  adminChangeLogs   CoachChangeLog[]     @relation("CoachChanges")
+
+  @@map("coach_profiles")
+}
+
+model StudentProfile {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  firstName String
+  lastName  String
+  grade     String   // "5. Sınıf", "8. Sınıf" gibi
+  phone     String?
+  parentPhone String?
+  currentCoachId String? // Tek koç kuralı: null ise atanmamış
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user              User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  receivedRequests  CoachStudentRequest[] @relation("StudentRequests")
+  assignments       Assignment[]
+  checkins          StudentCheckin[]
+  coachChangeLogs   CoachChangeLog[]     @relation("StudentCoachChanges")
+
+  @@index([currentCoachId])
+  @@map("student_profiles")
+}
+
+// =====================
+// Coach-Student Request System
+// =====================
+
+enum RequestStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  CANCELLED
+}
+
+model CoachStudentRequest {
+  id         String        @id @default(uuid())
+  coachId    String
+  studentId  String
+  status     RequestStatus @default(PENDING)
+  message    String?       // Koçun isteğe eklediği mesaj
+  createdAt  DateTime      @default(now())
+  respondedAt DateTime?
+
+  coach   CoachProfile   @relation("CoachRequests", fields: [coachId], references: [id], onDelete: Cascade)
+  student StudentProfile @relation("StudentRequests", fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([coachId])
+  @@index([studentId])
+  @@index([status])
+  @@map("coach_student_requests")
+}
+
+// Admin tarafından koç değişikliği log
+model CoachChangeLog {
+  id          String   @id @default(uuid())
+  studentId   String
+  oldCoachId  String?
+  newCoachId  String?
+  changedBy   String   // Admin userId
+  reason      String?
+  createdAt   DateTime @default(now())
+
+  student  StudentProfile @relation("StudentCoachChanges", fields: [studentId], references: [id], onDelete: Cascade)
+  newCoach CoachProfile?  @relation("CoachChanges", fields: [newCoachId], references: [id], onDelete: SetNull)
+
+  @@index([studentId])
+  @@map("coach_change_logs")
+}
+
+// =====================
+// Assignments (Ödevlendirme)
+// =====================
+
+model Assignment {
+  id        String   @id @default(uuid())
+  coachId   String
+  studentId String
+  startDate DateTime
+  endDate   DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  coach CoachProfile   @relation(fields: [coachId], references: [id], onDelete: Cascade)
+  student StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  items   AssignmentItem[]
+  checkins StudentCheckin[]
+
+  @@index([coachId])
+  @@index([studentId])
+  @@index([endDate]) // Bitişi yaklaşan ödevler için
+  @@map("assignments")
+}
+
+model AssignmentItem {
+  id            String   @id @default(uuid())
+  assignmentId  String
+  subject       String   // "Matematik", "Türkçe", vb.
+  topic         String   // "Kesirler", "Yazım Kuralları", vb.
+  source        String?  // Kaynak adı (opsiyonel)
+  questionCount Int
+  createdAt     DateTime @default(now())
+
+  assignment Assignment           @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  progress   AssignmentItemProgress?
+
+  @@index([assignmentId])
+  @@map("assignment_items")
+}
+
+// Öğrencinin ilerleme kaydı
+model AssignmentItemProgress {
+  id              String   @id @default(uuid())
+  assignmentItemId String  @unique
+  completedCount  Int      @default(0) // Kaç soru çözdü
+  lastUpdated     DateTime @default(now()) @updatedAt
+
+  assignmentItem AssignmentItem @relation(fields: [assignmentItemId], references: [id], onDelete: Cascade)
+
+  @@map("assignment_item_progress")
+}
+
+// =====================
+// Student Check-ins
+// =====================
+
+model StudentCheckin {
+  id           String   @id @default(uuid())
+  studentId    String
+  assignmentId String?  // Opsiyonel: hangi ödevle ilgili
+  date         DateTime @default(now())
+  note         String?  // Öğrencinin notu
+  createdAt    DateTime @default(now())
+
+  student    StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  assignment Assignment?    @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+
+  @@index([studentId])
+  @@index([assignmentId])
+  @@map("student_checkins")
+}
+
+// =====================
+// Catalog Data (MEB müfredatı - opsiyonel)
+// =====================
+
+model Subject {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  grade     String?  // Hangi sınıflar için
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  topics Topic[]
+
+  @@map("subjects")
+}
+
+model Topic {
+  id        String   @id @default(uuid())
+  subjectId String
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  subject Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  @@index([subjectId])
+  @@map("topics")
+}
+
+model Source {
+  id        String   @id @default(uuid())
+  name      String   @unique // "Biltest", "Tudem", vb.
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@map("sources")
+}
